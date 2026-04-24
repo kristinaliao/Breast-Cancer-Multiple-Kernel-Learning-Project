@@ -48,30 +48,51 @@ def main():
     print("\n--- Preprocessing Data ---")
     df_mrna_filtered, X_rppa_imputed = preprocess_data(df_mrna, X_rppa)
     
-    # Consistent split for experiments/standard mode
+    # 1. Create a consistent Train/Test split using indices to ensure both 
+    # Baselines and MKL are evaluated on the exact same hold-out patients.
     indices = np.arange(len(y_target))
     train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
 
+    # If an experiment is specified, run it and exit.
     if args.experiment:
         run_experiment(args.experiment, X_clinical, X_rppa_imputed, df_mrna_filtered, y_target, train_idx, test_idx, gmt_path)
         return
-
-    # Standard execution mode (existing logic)
+    
     results_file = "evaluation_results.txt"
+    # Initialize the results file for this run
     with open(results_file, "w") as f:
         f.write(f"--- ILC Proliferation Score Prediction Results (Mode: {args.mode}) ---\n")
 
+    # 2. Run Baselines (Random Forest & SVR)
     if args.mode in ['baseline', 'both']:
+        # Prepare tabular data by concatenating all modalities
         X_combined = pd.concat([X_clinical, X_rppa_imputed, df_mrna_filtered], axis=1)
-        baseline_results = run_baselines(X_combined.iloc[train_idx], X_combined.iloc[test_idx], 
-                                         y_target.iloc[train_idx], y_target.iloc[test_idx])
+        X_train_baseline = X_combined.iloc[train_idx]
+        X_test_baseline = X_combined.iloc[test_idx]
+        y_train_baseline = y_target.iloc[train_idx]
+        y_test_baseline = y_target.iloc[test_idx]
+
+        print("\n--- Running Baseline Models (Tuning on Train, Evaluating on Test) ---")
+        baseline_results = run_baselines(X_train_baseline, X_test_baseline, y_train_baseline, y_test_baseline)
+        
         with open(results_file, "a") as f:
             f.write("\n--- Baseline Hold-out Test Results ---\n")
             for model, metrics in baseline_results.items():
-                f.write(f"\n{model} Results: RMSE: {metrics['RMSE']:.4f}, R2: {metrics['R2']:.4f}\n")
+                f.write(f"\n{model} Results:\n")
+                f.write(f"  RMSE: {metrics['RMSE']:.4f}\n")
+                f.write(f"  R2:   {metrics['R2']:.4f}\n")
+                f.write(f"  Best Params: {metrics['Best_Params']}\n")
 
+    # 3. Run Multiple Kernel Learning (MKL)
     if args.mode in ['mkl', 'both']:
+        print("\n--- Kernel Computation & Normalization ---")
+        # Prepares pathway-based kernels (mRNA linear, RPPA RBF, Clinical linear)
         kernels = prepare_all_kernels(X_clinical, X_rppa_imputed, df_mrna_filtered, gmt_path)
+        
+        print(f"Total kernels prepared: {len(kernels)}")
+
+        print("\n--- Running Meta-Learner (Optimizing Weights on Train, Evaluating on Test) ---")
+        # Optimizes kernel weights via inner CV on train set, then evaluates once on test set
         sorted_drivers, mkl_metrics = run_mkl_pipeline(kernels, y_target, train_idx, test_idx)
         
         with open(results_file, "a") as f:
@@ -84,6 +105,14 @@ def main():
         print(f"\nMKL Finished. Test RMSE: {mkl_metrics['RMSE']:.4f}")
 
 def prepare_all_kernels(X_clinical, X_rppa, df_mrna, gmt_path):
+    """
+    Constructs and normalizes all pathway-based kernels for the MKL pipeline.
+    
+    This includes:
+    1. mRNA pathway kernels: Linear kernels for Hallmark pathways and custom ILC lists.
+    2. RPPA functional kernels: RBF kernels for targeted protein modules.
+    3. Clinical kernel: A global linear kernel for clinical features.
+    """
     hallmark_dict = parse_gmt_and_map(gmt_path, list(df_mrna.columns))
     clean_hallmark_dict = {k: v for k, v in hallmark_dict.items() if k not in LEAKAGE_KERNELS}
     pathways_dict = {**CUSTOM_LISTS, **clean_hallmark_dict}
@@ -95,6 +124,14 @@ def prepare_all_kernels(X_clinical, X_rppa, df_mrna, gmt_path):
     return kernels
 
 def run_experiment(exp_type, X_clinical, X_rppa, df_mrna, y_target, train_idx, test_idx, gmt_path):
+    """
+    Executes a specific research experiment to validate model stability and feature importance.
+    
+    Available Experiments:
+    - pruning: Evaluates performance using only a hand-picked set of 15 relevant kernels.
+    - ablation: Compares mRNA-only vs. RPPA-only vs. Combined model performance.
+    - bootstrapping: Runs 30 iterations of sampling with replacement to check weight consistency.
+    """
     print(f"\n=== Running Experiment: {exp_type.upper()} ===")
     all_kernels = prepare_all_kernels(X_clinical, X_rppa, df_mrna, gmt_path)
     
