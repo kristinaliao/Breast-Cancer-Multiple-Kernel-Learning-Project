@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import argparse
+import sys
 from src.data_processing import load_and_align_data, preprocess_data, parse_gmt_and_map
 from src.baselines import run_baselines
 from src.kernels import compute_kernels, normalize_all_kernels, normalize_kernel
@@ -9,10 +10,26 @@ from src.biological_lists import CUSTOM_LISTS, LEAKAGE_KERNELS, RPPA_PATHWAYS
 from sklearn.metrics.pairwise import linear_kernel, rbf_kernel
 from sklearn.model_selection import train_test_split
 
+def run_mkl_pipeline(normalized_kernels, y_target, train_idx, test_idx, silent=False):
+    """Helper to run MKL and return results."""
+    if not silent:
+        print(f"Running MKL with {len(normalized_kernels)} kernels...")
+    sorted_drivers, metrics, y_test, y_pred = run_meta_learner(
+        normalized_kernels, y_target, train_idx, test_idx
+    )
+    if not silent:
+        print("Top 10 Biological Drivers:")
+        for i, (pathway, weight) in enumerate(sorted_drivers.items()):
+            if i >= 10: break
+            print(f"  {i+1}. {pathway}: {weight:.4f}")
+    return sorted_drivers, metrics
+
 def main():
     parser = argparse.ArgumentParser(description='Run ILC Proliferation Prediction Pipeline')
     parser.add_argument('--mode', type=str, choices=['baseline', 'mkl', 'both'], default='both',
-                        help='Which models to run: baseline, mkl, or both (default: both)')
+                        help='Which models to run in standard mode (default: both)')
+    parser.add_argument('--experiment', type=str, choices=['pruning', 'ablation', 'bootstrapping'],
+                        help='Run a specific experiment')
     args = parser.parse_args()
 
     # File paths
@@ -26,88 +43,163 @@ def main():
     X_clinical, X_rppa, df_mrna, y = load_and_align_data(
         clinical_path, rppa_path, mrna_path, target_path
     )
-    print(f"Data aligned. Samples: {len(y)}")
-
-    print("\n--- Preprocessing Data ---")
-    df_mrna_filtered, X_rppa_imputed = preprocess_data(df_mrna, X_rppa)
-    print(f"mRNA features after filtering: {df_mrna_filtered.shape[1]}")
-    print(f"RPPA features after imputation: {X_rppa_imputed.shape[1]}")
-
     y_target = y['ProliferationScore']
     
-    # 1. Create a consistent Train/Test split using indices
+    print("\n--- Preprocessing Data ---")
+    df_mrna_filtered, X_rppa_imputed = preprocess_data(df_mrna, X_rppa)
+    
+    # Consistent split for experiments/standard mode
     indices = np.arange(len(y_target))
     train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
-    
+
+    if args.experiment:
+        run_experiment(args.experiment, X_clinical, X_rppa_imputed, df_mrna_filtered, y_target, train_idx, test_idx, gmt_path)
+        return
+
+    # Standard execution mode (existing logic)
     results_file = "evaluation_results.txt"
-    # Clear or initialize the results file
     with open(results_file, "w") as f:
         f.write(f"--- ILC Proliferation Score Prediction Results (Mode: {args.mode}) ---\n")
 
-    # 2. Run Baselines
     if args.mode in ['baseline', 'both']:
-        # Prepare data for baselines
         X_combined = pd.concat([X_clinical, X_rppa_imputed, df_mrna_filtered], axis=1)
-        X_train_baseline = X_combined.iloc[train_idx]
-        X_test_baseline = X_combined.iloc[test_idx]
-        y_train_baseline = y_target.iloc[train_idx]
-        y_test_baseline = y_target.iloc[test_idx]
-
-        print("\n--- Running Baseline Models (Tuning on Train, Evaluating on Test) ---")
-        baseline_results = run_baselines(X_train_baseline, X_test_baseline, y_train_baseline, y_test_baseline)
-        
+        baseline_results = run_baselines(X_combined.iloc[train_idx], X_combined.iloc[test_idx], 
+                                         y_target.iloc[train_idx], y_target.iloc[test_idx])
         with open(results_file, "a") as f:
             f.write("\n--- Baseline Hold-out Test Results ---\n")
             for model, metrics in baseline_results.items():
-                f.write(f"\n{model} Results:\n")
-                f.write(f"  RMSE: {metrics['RMSE']:.4f}\n")
-                f.write(f"  R2:   {metrics['R2']:.4f}\n")
-                f.write(f"  Best Params: {metrics['Best_Params']}\n")
+                f.write(f"\n{model} Results: RMSE: {metrics['RMSE']:.4f}, R2: {metrics['R2']:.4f}\n")
 
-    # 3. Run MKL
     if args.mode in ['mkl', 'both']:
-        print("\n--- Kernel Computation & Normalization ---")
-        # 1. Parse GMT for hallmark pathways
-        hallmark_dict = parse_gmt_and_map(gmt_path, list(df_mrna_filtered.columns))
-
-        ## REMOVE cell-cycle/proliferation proxy kernels
-        clean_hallmark_dict = {k: v for k, v in hallmark_dict.items() if k not in LEAKAGE_KERNELS}
+        kernels = prepare_all_kernels(X_clinical, X_rppa_imputed, df_mrna_filtered, gmt_path)
+        sorted_drivers, mkl_metrics = run_mkl_pipeline(kernels, y_target, train_idx, test_idx)
         
-        # 2. Combine pathway dictionaries
-        pathways_dict = {**CUSTOM_LISTS, **clean_hallmark_dict}
-        
-        # 3. Compute mRNA pathway kernels
-        mRNA_kernels = compute_kernels(df_mrna_filtered, pathways_dict, kernel_type='linear')
-        normalized_kernels = normalize_all_kernels(mRNA_kernels)
-        
-        # 4. Compute RPPA pathway kernels
-        RPPA_kernels = compute_kernels(X_rppa_imputed, RPPA_PATHWAYS, kernel_type='rbf')
-        normalized_RPPA_kernels = normalize_all_kernels(RPPA_kernels)
-        normalized_kernels.update(normalized_RPPA_kernels)
-        
-        # 5. Add Global Clinical Kernel
-        K_clinical = linear_kernel(X_clinical.values)
-        normalized_kernels['Clinical_Global'] = normalize_kernel(K_clinical)
-        
-        print(f"Total kernels prepared: {len(normalized_kernels)}")
-
-        print("\n--- Running Meta-Learner (Optimizing Weights on Train, Evaluating on Test) ---")
-        sorted_drivers, mkl_test_metrics = run_meta_learner(normalized_kernels, y_target, train_idx, test_idx)
-
         with open(results_file, "a") as f:
-            f.write("\n\n--- MKL Hold-out Test Results ---\n")
-            f.write(f"  RMSE: {mkl_test_metrics['RMSE']:.4f}\n")
-            f.write(f"  R2:   {mkl_test_metrics['R2']:.4f}\n")
-            f.write("\nTop Biological Drivers (Weights):\n")
-            for pathway, weight in sorted_drivers.items():
-                if weight > 0.01:
-                    f.write(f"  {pathway}: {weight:.4f}\n")
+            f.write(f"\n--- MKL Hold-out Test Results ---\nRMSE: {mkl_metrics['RMSE']:.4f}, R2: {mkl_metrics['R2']:.4f}\n")
+            f.write("\nTop 10 Biological Drivers:\n")
+            for i, (pathway, weight) in enumerate(sorted_drivers.items()):
+                if i >= 10: break
+                f.write(f"  {i+1}. {pathway}: {weight:.4f}\n")
+        
+        print(f"\nMKL Finished. Test RMSE: {mkl_metrics['RMSE']:.4f}")
 
-        print(f"\nOptimization Finished. Test RMSE: {mkl_test_metrics['RMSE']:.4f}")
-        print("\n--- Top Biological Drivers of ILC Proliferation ---")
-        for pathway, weight in sorted_drivers.items():
-            if weight > 0.01:
-                print(f"{pathway}: {weight:.4f}")
+def prepare_all_kernels(X_clinical, X_rppa, df_mrna, gmt_path):
+    hallmark_dict = parse_gmt_and_map(gmt_path, list(df_mrna.columns))
+    clean_hallmark_dict = {k: v for k, v in hallmark_dict.items() if k not in LEAKAGE_KERNELS}
+    pathways_dict = {**CUSTOM_LISTS, **clean_hallmark_dict}
+    
+    kernels = normalize_all_kernels(compute_kernels(df_mrna, pathways_dict, kernel_type='linear'))
+    rppa_kernels = normalize_all_kernels(compute_kernels(X_rppa, RPPA_PATHWAYS, kernel_type='rbf'))
+    kernels.update(rppa_kernels)
+    kernels['Clinical_Global'] = normalize_kernel(linear_kernel(X_clinical.values))
+    return kernels
+
+def run_experiment(exp_type, X_clinical, X_rppa, df_mrna, y_target, train_idx, test_idx, gmt_path):
+    print(f"\n=== Running Experiment: {exp_type.upper()} ===")
+    all_kernels = prepare_all_kernels(X_clinical, X_rppa, df_mrna, gmt_path)
+    
+    pruned_list = [
+        'Clinical_Global', 'ILC_AKT_Pathway', 'ILC_TF_Drivers', 'ILC_Adhesion',
+        'RPPA_PI3K_AKT_mTOR', 'RPPA_Receptors_RTK', 'RPPA_MAPK_ERK', 'RPPA_Adhesion_EMT',
+        'HALLMARK_KRAS_SIGNALING_DN', 'HALLMARK_ESTROGEN_RESPONSE_EARLY', 
+        'HALLMARK_ESTROGEN_RESPONSE_LATE', 'HALLMARK_APICAL_JUNCTION', 
+        'HALLMARK_GLYCOLYSIS', 'HALLMARK_HYPOXIA', 'HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION'
+    ]
+
+    with open("experiment_results.txt", "a") as f:
+        f.write(f"\n\n{'='*20} EXPERIMENT: {exp_type.upper()} {'='*20}\n")
+
+    if exp_type == 'pruning':
+        pruned_kernels = {k: v for k, v in all_kernels.items() if k in pruned_list}
+        
+        print("Running Full MKL (Benchmark)...")
+        _, full_metrics = run_mkl_pipeline(all_kernels, y_target, train_idx, test_idx)
+        print("Running Pruned MKL...")
+        _, pruned_metrics = run_mkl_pipeline(pruned_kernels, y_target, train_idx, test_idx)
+        
+        with open("experiment_results.txt", "a") as f:
+            f.write(f"Full Model RMSE:   {full_metrics['RMSE']:.4f}\n")
+            f.write(f"Pruned Model RMSE: {pruned_metrics['RMSE']:.4f}\n")
+
+    elif exp_type == 'ablation':
+        mrna_kernels = {k: v for k, v in all_kernels.items() if k.startswith('HALLMARK_') or k.startswith('ILC_')}
+        rppa_kernels = {k: v for k, v in all_kernels.items() if k.startswith('RPPA_')}
+        
+        print("Running mRNA-only MKL...")
+        _, mrna_metrics = run_mkl_pipeline(mrna_kernels, y_target, train_idx, test_idx)
+        print("Running RPPA-only MKL...")
+        _, rppa_metrics = run_mkl_pipeline(rppa_kernels, y_target, train_idx, test_idx)
+        print("Running Combined MKL...")
+        _, both_metrics = run_mkl_pipeline({**mrna_kernels, **rppa_kernels}, y_target, train_idx, test_idx)
+
+        with open("experiment_results.txt", "a") as f:
+            f.write(f"mRNA-only RMSE: {mrna_metrics['RMSE']:.4f}\n")
+            f.write(f"RPPA-only RMSE: {rppa_metrics['RMSE']:.4f}\n")
+            f.write(f"Combined RMSE:  {both_metrics['RMSE']:.4f}\n")
+
+    elif exp_type == 'bootstrapping':
+        # Use ONLY pruned kernels for bootstrapping
+        bootstrap_kernels = {k: v for k, v in all_kernels.items() if k in pruned_list}
+        n_iterations = 30
+        all_weights = []
+        all_rmse = []
+        kernel_names = list(bootstrap_kernels.keys())
+        
+        boot_file = "bootstrapping_results.txt"
+        with open(boot_file, "w") as f:
+            f.write(f"=== ILC Bootstrapping Experiment ({n_iterations} Iterations) ===\n")
+            f.write(f"Kernels used: {', '.join(kernel_names)}\n\n")
+
+        print(f"Starting Bootstrap ({n_iterations} iterations) on {len(kernel_names)} pruned kernels...")
+        for i in range(n_iterations):
+            # Sampling WITH REPLACEMENT from the training indices
+            boot_train_idx = np.random.choice(train_idx, size=len(train_idx), replace=True)
+            
+            # Use original test_idx for consistent evaluation
+            drivers, metrics = run_mkl_pipeline(bootstrap_kernels, y_target, boot_train_idx, test_idx, silent=True)
+            
+            # Display and Log top 10 for this specific bootstrap run
+            print(f"  Iteration {i+1} Top Drivers:")
+            with open(boot_file, "a") as f:
+                f.write(f"Iteration {i+1} | RMSE: {metrics['RMSE']:.4f}\n")
+                for j, (pathway, weight) in enumerate(drivers.items()):
+                    if j >= 10: break
+                    output_line = f"    {j+1}. {pathway}: {weight:.4f}"
+                    print(output_line)
+                    f.write(output_line + "\n")
+                f.write("\n")
+            
+            # Map weights to consistent order
+            weights = [drivers.get(name, 0) for name in kernel_names]
+            all_weights.append(weights)
+            all_rmse.append(metrics['RMSE'])
+            if (i+1) % 10 == 0:
+                print(f" Completed {i+1}/{n_iterations} iterations.")
+
+        avg_weights = np.mean(all_weights, axis=0)
+        std_weights = np.std(all_weights, axis=0)
+        
+        # Create a clean DataFrame for the final stability report
+        df_stability = pd.DataFrame({
+            'Pathway': kernel_names,
+            'Mean_Weight': avg_weights,
+            'Std_Deviation': std_weights
+        }).sort_values(by='Mean_Weight', ascending=False)
+        
+        stability_report = df_stability.to_string(index=False)
+        
+        with open(boot_file, "a") as f:
+            f.write("\n--- Final Bootstrap Stability Results ---\n")
+            f.write(stability_report)
+            f.write(f"\n\nBootstrap Avg RMSE: {np.mean(all_rmse):.4f} (+/- {np.std(all_rmse):.4f})\n")
+            
+        with open("experiment_results.txt", "a") as f:
+            f.write(f"Bootstrap Avg RMSE: {np.mean(all_rmse):.4f} (+/- {np.std(all_rmse):.4f})\n")
+            f.write("Full stability analysis saved to 'bootstrapping_results.txt'\n")
+            
+        print("\n--- Final Bootstrap Stability Results ---")
+        print(stability_report)
+        print(f"\nBootstrapping complete. Detailed results in 'bootstrapping_results.txt'.")
 
 if __name__ == "__main__":
     main()

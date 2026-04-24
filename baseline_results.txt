@@ -1,3 +1,0 @@
-
-Random Forest Results:  MSE: 0.1074  R2:  0.4968
-SVR Results:  MSE: 0.1693  R2:  0.2067
