@@ -51,23 +51,7 @@ RPPA_PATHWAYS = {
         'ARAF', 'ARAF_pS299', 'BRAF', 'BRAF_pS445', 'CRAF', 'CRAF_pS338', 
         'MEK1', 'MEK1_pS217S221', 'MEK2', 'MAPK_pT202Y204', 'p44-42-MAPK', 
         'P38MAPK', 'P38_pT180Y182', 'p38-a', 'JNK2', 'JNK_pT183Y185'
-    ],
-
-    # # 5. Cell Cycle & DNA Repair
-    # 'RPPA_CellCycle_Repair': [
-    #     'CDK1', 'CDK1_pT14', 'CDK1_pY15', 'CYCLINB1', 'CYCLIND1', 'CYCLINE1', 
-    #     'CYCLINE2', 'P16INK4A', 'P21', 'P27', 'P27_pT157', 'P27_pT198', 
-    #     'RB', 'RB_pS807S811', 'P53', 'ATM', 'ATM_pS1981', 'ATR', 'ATR_pS428', 
-    #     'CHK1', 'CHK1_pS296', 'CHK1_pS345', 'CHK2', 'CHK2_pT68', 
-    #     'H2AX_pS139', 'H2AX_pS140'
-    # ],
-
-    # # 6. Apoptosis & Survival
-    # 'RPPA_Apoptosis': [
-    #     'BAX', 'BAK', 'BAD_pS112', 'BCL2', 'BCL2A1', 'BCLXL', 'BIM', 'BID', 
-    #     'Mcl-1', 'Puma', 'CASPASE3', 'CASPASE7CLEAVEDD198', 'CASPASE8', 
-    #     'Caspase-8-cleaved', 'PARP1', 'PARPCLEAVED', 'XIAP', 'SMAC'
-    # ]
+    ]
 }
 
 
