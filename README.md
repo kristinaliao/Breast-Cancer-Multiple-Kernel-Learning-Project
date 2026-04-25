@@ -5,10 +5,10 @@
 - `main.py`: Entry point for running the pipeline and experiments.
 - `src/`: 
     - `data_processing.py`: Data loading, alignment, and multi-omic preprocessing.
-    - `kernels.py`: Kernel computation (Linear, RBF) and normalization functions.
+    - `kernels.py`: Kernel computation and normalization functions.
     - `mkl.py`: MKL meta-learner using SLSQP optimization for kernel weighting.
     - `baselines.py`: Random Forest and SVR baseline models with hyperparameter tuning.
-    - `biological_lists.py`: Centralized definitions for gene pathways and RPPA modules.
+    - `biological_lists.py`: Centralized definitions for mRNA pathways and RPPA modules.
 - `data/`: Directory for input CSV and GMT files.
 
 ## Installation
@@ -45,7 +45,7 @@ Run experiments:
 
 ## Outputs
 
-- `evaluation_results.txt`: Summary of test metrics (RMSE, R2) and top drivers for standard runs.
+- `evaluation_results.txt`: Summary of test metrics and top drivers for standard runs.
 - `experiment_results.txt`: Summary results for the selected experiment.
 - `bootstrapping_results.txt`: Detailed per-iteration logs and stability analysis for the bootstrap experiment.
 - `residual_analysis.txt`: Clinical profile of top outliers (highest prediction errors) from the MKL model.
